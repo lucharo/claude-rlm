@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-
-from typing import Literal
+from typing import Any, Literal
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -19,10 +18,86 @@ from claude_agent_sdk import (
     ToolUseBlock,
     query,
 )
-
-PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 from rlm.clients.base_lm import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
+
+PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
+
+
+@dataclass
+class CallMetrics:
+    """Metrics for a single API call."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    input_chars: int = 0
+    output_chars: int = 0
+    duration_ms: float = 0
+    tool_uses: int = 0
+    tool_names: list[str] = field(default_factory=list)
+    thinking_blocks: int = 0
+    text_blocks: int = 0
+    model: str = ""
+
+
+@dataclass
+class SessionMetrics:
+    """Cumulative metrics for an RLM session."""
+
+    total_api_calls: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_input_chars: int = 0
+    total_output_chars: int = 0
+    total_duration_ms: float = 0
+    total_tool_uses: int = 0
+    total_thinking_blocks: int = 0
+    total_text_blocks: int = 0
+    tool_usage_counts: dict[str, int] = field(default_factory=dict)
+    calls: list[CallMetrics] = field(default_factory=list)
+    start_time: float = field(default_factory=time.time)
+
+    def add_call(self, call: CallMetrics) -> None:
+        """Add a call's metrics to the session totals."""
+        self.total_api_calls += 1
+        self.total_input_tokens += call.input_tokens
+        self.total_output_tokens += call.output_tokens
+        self.total_input_chars += call.input_chars
+        self.total_output_chars += call.output_chars
+        self.total_duration_ms += call.duration_ms
+        self.total_tool_uses += call.tool_uses
+        self.total_thinking_blocks += call.thinking_blocks
+        self.total_text_blocks += call.text_blocks
+        for tool in call.tool_names:
+            self.tool_usage_counts[tool] = self.tool_usage_counts.get(tool, 0) + 1
+        self.calls.append(call)
+
+    def summary(self) -> str:
+        """Return a formatted summary of session metrics."""
+        elapsed = time.time() - self.start_time
+        lines = [
+            "═" * 50,
+            "SESSION METRICS",
+            "═" * 50,
+            f"API Calls:        {self.total_api_calls}",
+            f"Input Tokens:     {self.total_input_tokens:,}",
+            f"Output Tokens:    {self.total_output_tokens:,}",
+            f"Total Tokens:     {self.total_input_tokens + self.total_output_tokens:,}",
+            f"Input Chars:      {self.total_input_chars:,}",
+            f"Output Chars:     {self.total_output_chars:,}",
+            f"API Time:         {self.total_duration_ms / 1000:.2f}s",
+            f"Wall Time:        {elapsed:.2f}s",
+            f"Tool Uses:        {self.total_tool_uses}",
+            f"Thinking Blocks:  {self.total_thinking_blocks}",
+            f"Text Blocks:      {self.total_text_blocks}",
+        ]
+        if self.tool_usage_counts:
+            lines.append("─" * 50)
+            lines.append("Tool Breakdown:")
+            for tool, count in sorted(self.tool_usage_counts.items(), key=lambda x: -x[1]):
+                lines.append(f"  {tool}: {count}")
+        lines.append("═" * 50)
+        return "\n".join(lines)
 
 
 @dataclass
@@ -53,12 +128,16 @@ class ClaudeCodeClient(BaseLM):
     permission_mode: PermissionMode = "bypassPermissions"
     _system_prompt: str | None = field(default=None, repr=False)
 
-    # Usage tracking
+    # Usage tracking (legacy)
     _total_calls: int = field(default=0, repr=False)
     _total_input_tokens: int = field(default=0, repr=False)
     _total_output_tokens: int = field(default=0, repr=False)
     _last_input_tokens: int = field(default=0, repr=False)
     _last_output_tokens: int = field(default=0, repr=False)
+
+    # Detailed metrics tracking
+    _metrics: SessionMetrics = field(default_factory=SessionMetrics, repr=False)
+    _last_call_metrics: CallMetrics | None = field(default=None, repr=False)
 
     def __post_init__(self):
         """Initialize the client."""
@@ -172,9 +251,17 @@ class ClaudeCodeClient(BaseLM):
             if system_prompt:
                 print(f"[ClaudeCodeClient] System prompt: {len(system_prompt)} chars")
 
+        # Initialize call metrics
+        call_start = time.time()
+        call_metrics = CallMetrics(
+            input_chars=len(user_prompt) + (len(system_prompt) if system_prompt else 0),
+            model=options.model or self.model_name,
+        )
+
         response_parts: list[str] = []
         total_input_tokens = 0
         total_output_tokens = 0
+        duration_ms = 0
 
         async for message in query(prompt=user_prompt, options=options):
             if self.verbose:
@@ -186,11 +273,17 @@ class ClaudeCodeClient(BaseLM):
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             response_parts.append(block.text)
-                        elif isinstance(block, ThinkingBlock) and self.verbose:
-                            thinking_preview = block.thinking[:100] if block.thinking else ""
-                            print(f"[ClaudeCodeClient] Thinking: {thinking_preview}...")
-                        elif isinstance(block, ToolUseBlock) and self.verbose:
-                            print(f"[ClaudeCodeClient] Tool: {block.name}")
+                            call_metrics.text_blocks += 1
+                        elif isinstance(block, ThinkingBlock):
+                            call_metrics.thinking_blocks += 1
+                            if self.verbose:
+                                thinking_preview = block.thinking[:100] if block.thinking else ""
+                                print(f"[ClaudeCodeClient] Thinking: {thinking_preview}...")
+                        elif isinstance(block, ToolUseBlock):
+                            call_metrics.tool_uses += 1
+                            call_metrics.tool_names.append(block.name)
+                            if self.verbose:
+                                print(f"[ClaudeCodeClient] Tool: {block.name}")
                         elif isinstance(block, ToolResultBlock) and self.verbose:
                             print(f"[ClaudeCodeClient] Tool result: {block.tool_use_id}")
             elif isinstance(message, ResultMessage):
@@ -198,22 +291,29 @@ class ClaudeCodeClient(BaseLM):
                 if message.usage:
                     total_input_tokens = getattr(message.usage, "input_tokens", 0)
                     total_output_tokens = getattr(message.usage, "output_tokens", 0)
+                duration_ms = getattr(message, "duration_ms", 0) or 0
                 if message.is_error:
                     raise RuntimeError(f"Claude agent error: {message.result}")
 
         response = "\n".join(response_parts) if response_parts else ""
 
-        # Update usage tracking
-        self._total_calls += 1
+        # Finalize call metrics
+        call_metrics.output_chars = len(response)
+        call_metrics.duration_ms = duration_ms or ((time.time() - call_start) * 1000)
         # Use actual tokens if available, otherwise estimate
-        if total_input_tokens == 0:
-            total_input_tokens = len(user_prompt) // 4
-        if total_output_tokens == 0:
-            total_output_tokens = len(response) // 4
-        self._last_input_tokens = total_input_tokens
-        self._last_output_tokens = total_output_tokens
-        self._total_input_tokens += total_input_tokens
-        self._total_output_tokens += total_output_tokens
+        call_metrics.input_tokens = total_input_tokens or (call_metrics.input_chars // 4)
+        call_metrics.output_tokens = total_output_tokens or (call_metrics.output_chars // 4)
+
+        # Update session metrics
+        self._metrics.add_call(call_metrics)
+        self._last_call_metrics = call_metrics
+
+        # Update legacy usage tracking
+        self._total_calls += 1
+        self._last_input_tokens = call_metrics.input_tokens
+        self._last_output_tokens = call_metrics.output_tokens
+        self._total_input_tokens += call_metrics.input_tokens
+        self._total_output_tokens += call_metrics.output_tokens
 
         if self.verbose:
             print(f"[ClaudeCodeClient] Response ({len(response)} chars)")
@@ -301,3 +401,33 @@ class ClaudeCodeClient(BaseLM):
                 )
             }
         )
+
+    def get_metrics(self) -> SessionMetrics:
+        """Get detailed session metrics.
+
+        Returns:
+            SessionMetrics with comprehensive usage data
+        """
+        return self._metrics
+
+    def get_last_call_metrics(self) -> CallMetrics | None:
+        """Get metrics for the last API call.
+
+        Returns:
+            CallMetrics for the last call, or None if no calls made
+        """
+        return self._last_call_metrics
+
+    def reset_metrics(self) -> None:
+        """Reset all metrics to start fresh."""
+        self._metrics = SessionMetrics()
+        self._last_call_metrics = None
+        self._total_calls = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._last_input_tokens = 0
+        self._last_output_tokens = 0
+
+    def print_metrics(self) -> None:
+        """Print a formatted summary of session metrics."""
+        print(self._metrics.summary())

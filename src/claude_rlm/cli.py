@@ -14,7 +14,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from claude_rlm.client import ClaudeCodeClient
+from claude_rlm.client import ClaudeCodeClient, SessionMetrics
 
 app = typer.Typer(
     name="claude-rlm",
@@ -25,6 +25,7 @@ console = Console()
 
 
 _rlm_patched = False
+_active_clients: list[ClaudeCodeClient] = []  # Track created clients for metrics
 
 
 def _patch_rlm_clients():
@@ -41,7 +42,9 @@ def _patch_rlm_clients():
 
     def patched_get_client(backend, backend_kwargs):
         if backend == "claude-code":
-            return ClaudeCodeClient(**backend_kwargs)
+            client = ClaudeCodeClient(**backend_kwargs)
+            _active_clients.append(client)
+            return client
         return original_get_client(backend, backend_kwargs)
 
     # Patch the function in the module
@@ -54,6 +57,44 @@ def _patch_rlm_clients():
             rlm_core.get_client = patched_get_client
     except (ImportError, AttributeError):
         pass
+
+
+def get_combined_metrics() -> SessionMetrics:
+    """Combine metrics from all active clients."""
+    combined = SessionMetrics()
+    for client in _active_clients:
+        client_metrics = client.get_metrics()
+        for call in client_metrics.calls:
+            combined.add_call(call)
+    return combined
+
+
+def clear_clients():
+    """Clear active clients list."""
+    _active_clients.clear()
+
+
+def print_metrics_panel():
+    """Print a rich-formatted metrics panel."""
+    metrics = get_combined_metrics()
+    if metrics.total_api_calls == 0:
+        return
+
+    # Build metrics table
+    lines = [
+        f"[cyan]API Calls:[/cyan]        {metrics.total_api_calls}",
+        f"[cyan]Input Tokens:[/cyan]     {metrics.total_input_tokens:,}",
+        f"[cyan]Output Tokens:[/cyan]    {metrics.total_output_tokens:,}",
+        f"[cyan]Total Tokens:[/cyan]     {metrics.total_input_tokens + metrics.total_output_tokens:,}",
+        f"[cyan]API Time:[/cyan]         {metrics.total_duration_ms / 1000:.2f}s",
+        f"[cyan]Tool Uses:[/cyan]        {metrics.total_tool_uses}",
+    ]
+
+    if metrics.tool_usage_counts:
+        tool_str = ", ".join(f"{t}:{c}" for t, c in sorted(metrics.tool_usage_counts.items(), key=lambda x: -x[1]))
+        lines.append(f"[cyan]Tools:[/cyan]            {tool_str}")
+
+    console.print(Panel("\n".join(lines), title="Usage Metrics", border_style="yellow"))
 
 
 # Apply patch immediately at import time
@@ -104,6 +145,7 @@ def run_query(
     agentic: bool,
     cwd: Path,
     verbose: bool,
+    show_metrics: bool = True,
 ) -> str:
     """Execute a single query through RLM.
 
@@ -115,10 +157,14 @@ def run_query(
         agentic: Whether to enable Claude's tools
         cwd: Working directory
         verbose: Enable verbose output
+        show_metrics: Whether to print metrics after completion
 
     Returns:
         The RLM response
     """
+    # Clear previous clients to get fresh metrics
+    clear_clients()
+
     rlm = get_rlm(model, max_depth, max_iterations, agentic, cwd, verbose)
 
     with Progress(
@@ -129,6 +175,10 @@ def run_query(
     ) as progress:
         progress.add_task("Processing with RLM...", total=None)
         result = rlm.completion(prompt)
+
+    # Print metrics
+    if show_metrics:
+        print_metrics_panel()
 
     return result.response
 
@@ -160,10 +210,17 @@ def query_cmd(
         bool,
         typer.Option("--verbose", "-v", help="Enable verbose output"),
     ] = False,
+    no_metrics: Annotated[
+        bool,
+        typer.Option("--no-metrics", help="Suppress usage metrics output"),
+    ] = False,
 ) -> None:
     """Execute a single query through RLM."""
     try:
-        result = run_query(prompt, model, max_depth, max_iterations, agentic, cwd.resolve(), verbose)
+        result = run_query(
+            prompt, model, max_depth, max_iterations, agentic, cwd.resolve(), verbose,
+            show_metrics=not no_metrics
+        )
         console.print(Panel(Markdown(result), title="Result", border_style="green"))
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -246,7 +303,8 @@ def repl_cmd(
                 continue
 
             result = run_query(
-                prompt, model, max_depth, max_iterations, agentic, cwd_resolved, verbose
+                prompt, model, max_depth, max_iterations, agentic, cwd_resolved, verbose,
+                show_metrics=True
             )
             console.print(Panel(Markdown(result), title="Result", border_style="green"))
 
