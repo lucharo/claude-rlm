@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, query
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    query,
+)
 from rlm.clients.base_lm import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
 
@@ -57,7 +63,42 @@ class ClaudeCodeClient(BaseLM):
         """Set the system prompt."""
         self._system_prompt = value
 
-    def _build_options(self) -> ClaudeAgentOptions:
+    def _prepare_prompt(
+        self, prompt: str | list[dict[str, Any]]
+    ) -> tuple[str, str | None]:
+        """Convert prompt to string format and extract system prompt.
+
+        Args:
+            prompt: Either a string or a list of message dicts (OpenAI chat format)
+
+        Returns:
+            Tuple of (user_prompt, system_prompt)
+        """
+        if isinstance(prompt, str):
+            return prompt, self._system_prompt
+
+        if isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
+            system_prompt = None
+            user_messages: list[str] = []
+
+            for msg in prompt:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+
+                if role == "system":
+                    system_prompt = content
+                elif role == "user":
+                    user_messages.append(f"User: {content}")
+                elif role == "assistant":
+                    user_messages.append(f"Assistant: {content}")
+
+            # Combine system and user prompts
+            combined_prompt = "\n\n".join(user_messages) if user_messages else ""
+            return combined_prompt, system_prompt or self._system_prompt
+
+        raise ValueError(f"Invalid prompt type: {type(prompt)}")
+
+    def _build_options(self, system_prompt: str | None = None) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions for the query."""
         # Determine allowed tools based on agentic mode
         if self.agentic:
@@ -72,7 +113,7 @@ class ClaudeCodeClient(BaseLM):
                 "WebSearch",
             ]
         else:
-            # Non-agentic: only allow basic response
+            # Non-agentic: explicitly disable all tools
             allowed_tools = []
 
         return ClaudeAgentOptions(
@@ -80,77 +121,92 @@ class ClaudeCodeClient(BaseLM):
             max_turns=50 if self.agentic else 1,
             permission_mode="bypassPermissions",  # Run without permission prompts
             cwd=str(self.cwd),
-            allowed_tools=allowed_tools if allowed_tools else None,
-            system_prompt=self._system_prompt,
+            allowed_tools=allowed_tools,
+            system_prompt=system_prompt or self._system_prompt,
         )
 
     async def _acompletion_impl(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, Any]],
         model: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Implement async completion using claude-agent-sdk.
 
         Args:
-            prompt: The prompt to send to Claude
+            prompt: The prompt to send to Claude (string or message list)
             model: Override model (optional, uses self.model_name if not provided)
             **kwargs: Additional arguments (ignored for compatibility)
 
         Returns:
             The model's response text
         """
-        options = self._build_options()
+        # Convert prompt to string and extract system prompt
+        user_prompt, system_prompt = self._prepare_prompt(prompt)
+        options = self._build_options(system_prompt)
 
         # Override model if specified
         if model:
             options.model = model
 
         if self.verbose:
-            print(f"[ClaudeCodeClient] Sending prompt ({len(prompt)} chars)")
+            print(f"[ClaudeCodeClient] Sending prompt ({len(user_prompt)} chars)")
             print(f"[ClaudeCodeClient] Model: {options.model}")
             print(f"[ClaudeCodeClient] Agentic: {self.agentic}")
+            if system_prompt:
+                print(f"[ClaudeCodeClient] System prompt: {len(system_prompt)} chars")
 
         response_parts: list[str] = []
+        total_input_tokens = 0
+        total_output_tokens = 0
 
-        async for message in query(prompt=prompt, options=options):
-            # Handle different message types from claude-agent-sdk
-            if hasattr(message, "type"):
-                if message.type == "text":
-                    response_parts.append(message.content)
-                elif message.type == "result":
-                    # Final result message
-                    if hasattr(message, "text"):
-                        response_parts.append(message.text)
-                elif message.type == "error":
-                    raise RuntimeError(f"Claude agent error: {message.content}")
+        async for message in query(prompt=user_prompt, options=options):
+            if self.verbose:
+                print(f"[ClaudeCodeClient] Received {type(message).__name__}")
 
-        response = "".join(response_parts)
+            if isinstance(message, AssistantMessage):
+                # Extract text from content blocks
+                if message.content:
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            response_parts.append(block.text)
+            elif isinstance(message, ResultMessage):
+                # Final result - extract usage info if available
+                if message.usage:
+                    total_input_tokens = getattr(message.usage, "input_tokens", 0)
+                    total_output_tokens = getattr(message.usage, "output_tokens", 0)
+                if message.is_error:
+                    raise RuntimeError(f"Claude agent error: {message.result}")
 
-        # Update usage tracking (estimate tokens as ~4 chars per token)
+        response = "\n".join(response_parts) if response_parts else ""
+
+        # Update usage tracking
         self._total_calls += 1
-        input_tokens = len(prompt) // 4
-        output_tokens = len(response) // 4
-        self._last_input_tokens = input_tokens
-        self._last_output_tokens = output_tokens
-        self._total_input_tokens += input_tokens
-        self._total_output_tokens += output_tokens
+        # Use actual tokens if available, otherwise estimate
+        if total_input_tokens == 0:
+            total_input_tokens = len(user_prompt) // 4
+        if total_output_tokens == 0:
+            total_output_tokens = len(response) // 4
+        self._last_input_tokens = total_input_tokens
+        self._last_output_tokens = total_output_tokens
+        self._total_input_tokens += total_input_tokens
+        self._total_output_tokens += total_output_tokens
 
         if self.verbose:
-            print(f"[ClaudeCodeClient] Received response ({len(response)} chars)")
+            print(f"[ClaudeCodeClient] Response ({len(response)} chars)")
 
         return response
 
     def _completion_impl(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, Any]],
         model: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Implement sync completion by wrapping async version.
 
         Args:
-            prompt: The prompt to send to Claude
+            prompt: The prompt to send to Claude (string or message list)
             model: Override model (optional)
             **kwargs: Additional arguments
 
@@ -161,14 +217,14 @@ class ClaudeCodeClient(BaseLM):
 
     def completion(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, Any]],
         model: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Get a completion from Claude.
 
         Args:
-            prompt: The prompt to send
+            prompt: The prompt to send (string or message list)
             model: Override model (optional)
             **kwargs: Additional arguments
 
@@ -179,14 +235,14 @@ class ClaudeCodeClient(BaseLM):
 
     async def acompletion(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, Any]],
         model: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Get an async completion from Claude.
 
         Args:
-            prompt: The prompt to send
+            prompt: The prompt to send (string or message list)
             model: Override model (optional)
             **kwargs: Additional arguments
 
