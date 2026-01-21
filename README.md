@@ -1,6 +1,6 @@
 # claude-rlm
 
-Claude Code backend for [RLM](https://github.com/ax-ai-research/rlm) (Recursive Language Models).
+Claude Code backend for [RLM](https://github.com/alexzhang13/rlm) (Recursive Language Models).
 
 ## Overview
 

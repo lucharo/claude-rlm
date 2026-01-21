@@ -9,6 +9,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 from rlm.clients.base_lm import BaseLM
+from rlm.core.types import ModelUsageSummary, UsageSummary
 
 
 @dataclass
@@ -32,6 +33,13 @@ class ClaudeCodeClient(BaseLM):
     max_tokens: int = 16384
     verbose: bool = False
     _system_prompt: str | None = field(default=None, repr=False)
+
+    # Usage tracking
+    _total_calls: int = field(default=0, repr=False)
+    _total_input_tokens: int = field(default=0, repr=False)
+    _total_output_tokens: int = field(default=0, repr=False)
+    _last_input_tokens: int = field(default=0, repr=False)
+    _last_output_tokens: int = field(default=0, repr=False)
 
     def __post_init__(self):
         """Initialize the client."""
@@ -70,7 +78,6 @@ class ClaudeCodeClient(BaseLM):
         return ClaudeAgentOptions(
             model=self.model_name,
             max_turns=50 if self.agentic else 1,
-            max_tokens=self.max_tokens,
             permission_mode="bypassPermissions",  # Run without permission prompts
             cwd=str(self.cwd),
             allowed_tools=allowed_tools if allowed_tools else None,
@@ -119,6 +126,15 @@ class ClaudeCodeClient(BaseLM):
                     raise RuntimeError(f"Claude agent error: {message.content}")
 
         response = "".join(response_parts)
+
+        # Update usage tracking (estimate tokens as ~4 chars per token)
+        self._total_calls += 1
+        input_tokens = len(prompt) // 4
+        output_tokens = len(response) // 4
+        self._last_input_tokens = input_tokens
+        self._last_output_tokens = output_tokens
+        self._total_input_tokens += input_tokens
+        self._total_output_tokens += output_tokens
 
         if self.verbose:
             print(f"[ClaudeCodeClient] Received response ({len(response)} chars)")
@@ -178,3 +194,31 @@ class ClaudeCodeClient(BaseLM):
             The model's response
         """
         return await self._acompletion_impl(prompt, model, **kwargs)
+
+    def get_last_usage(self) -> ModelUsageSummary:
+        """Get usage statistics for the last API call.
+
+        Returns:
+            ModelUsageSummary with token counts for the last call
+        """
+        return ModelUsageSummary(
+            total_calls=1 if self._last_input_tokens > 0 else 0,
+            total_input_tokens=self._last_input_tokens,
+            total_output_tokens=self._last_output_tokens,
+        )
+
+    def get_usage_summary(self) -> UsageSummary:
+        """Get aggregated usage statistics across all API calls.
+
+        Returns:
+            UsageSummary with total token counts by model
+        """
+        return UsageSummary(
+            model_usage_summaries={
+                self.model_name: ModelUsageSummary(
+                    total_calls=self._total_calls,
+                    total_input_tokens=self._total_input_tokens,
+                    total_output_tokens=self._total_output_tokens,
+                )
+            }
+        )

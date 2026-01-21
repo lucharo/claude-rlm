@@ -24,6 +24,42 @@ app = typer.Typer(
 console = Console()
 
 
+_rlm_patched = False
+
+
+def _patch_rlm_clients():
+    """Monkey-patch RLM to support claude-code backend."""
+    global _rlm_patched
+    if _rlm_patched:
+        return
+    _rlm_patched = True
+
+    # Patch at the source module level
+    import rlm.clients
+
+    original_get_client = rlm.clients.get_client
+
+    def patched_get_client(backend, backend_kwargs):
+        if backend == "claude-code":
+            return ClaudeCodeClient(**backend_kwargs)
+        return original_get_client(backend, backend_kwargs)
+
+    # Patch the function in the module
+    rlm.clients.get_client = patched_get_client
+
+    # Also patch in rlm.core.rlm if it has already imported get_client
+    try:
+        import rlm.core.rlm as rlm_core
+        if hasattr(rlm_core, "get_client"):
+            rlm_core.get_client = patched_get_client
+    except (ImportError, AttributeError):
+        pass
+
+
+# Apply patch immediately at import time
+_patch_rlm_clients()
+
+
 def get_rlm(
     model: str,
     max_depth: int,
@@ -47,16 +83,14 @@ def get_rlm(
     """
     from rlm import RLM
 
-    client = ClaudeCodeClient(
-        model_name=model,
-        agentic=agentic,
-        cwd=cwd,
-        verbose=verbose,
-    )
-
     return RLM(
-        backend="custom",
-        backend_kwargs={"client": client},
+        backend="claude-code",
+        backend_kwargs={
+            "model_name": model,
+            "agentic": agentic,
+            "cwd": cwd,
+            "verbose": verbose,
+        },
         max_depth=max_depth,
         max_iterations=max_iterations,
     )
@@ -94,9 +128,9 @@ def run_query(
         transient=True,
     ) as progress:
         progress.add_task("Processing with RLM...", total=None)
-        result = rlm(prompt)
+        result = rlm.completion(prompt)
 
-    return result
+    return result.response
 
 
 @app.command("query")

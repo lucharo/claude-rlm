@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "rlm @ git+https://github.com/ax-ai-research/rlm.git",
+    "rlm @ git+https://github.com/alexzhang13/rlm.git",
     "claude-agent-sdk>=0.1.0",
     "prompt-toolkit>=3.0.0",
     "rich>=13.0.0",
@@ -55,3 +55,6 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
