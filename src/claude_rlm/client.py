@@ -7,13 +7,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from typing import Literal
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
     query,
 )
+
+PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 from rlm.clients.base_lm import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
 
@@ -31,6 +38,11 @@ class ClaudeCodeClient(BaseLM):
         cwd: Working directory for agentic operations
         max_tokens: Maximum tokens for response
         verbose: Enable verbose output
+        permission_mode: How to handle tool permissions:
+            - "default": Normal permission prompts
+            - "acceptEdits": Auto-accept file edits
+            - "plan": Planning mode
+            - "bypassPermissions": Skip all permission checks (use with caution)
     """
 
     model_name: str = "claude-sonnet-4-20250514"
@@ -38,6 +50,7 @@ class ClaudeCodeClient(BaseLM):
     cwd: Path | None = None
     max_tokens: int = 16384
     verbose: bool = False
+    permission_mode: PermissionMode = "bypassPermissions"
     _system_prompt: str | None = field(default=None, repr=False)
 
     # Usage tracking
@@ -116,10 +129,13 @@ class ClaudeCodeClient(BaseLM):
             # Non-agentic: explicitly disable all tools
             allowed_tools = []
 
+        if self.verbose and self.permission_mode == "bypassPermissions":
+            print("[ClaudeCodeClient] WARNING: Running with bypassPermissions - all tool calls auto-approved")
+
         return ClaudeAgentOptions(
             model=self.model_name,
             max_turns=50 if self.agentic else 1,
-            permission_mode="bypassPermissions",  # Run without permission prompts
+            permission_mode=self.permission_mode,
             cwd=str(self.cwd),
             allowed_tools=allowed_tools,
             system_prompt=system_prompt or self._system_prompt,
@@ -170,6 +186,13 @@ class ClaudeCodeClient(BaseLM):
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             response_parts.append(block.text)
+                        elif isinstance(block, ThinkingBlock) and self.verbose:
+                            thinking_preview = block.thinking[:100] if block.thinking else ""
+                            print(f"[ClaudeCodeClient] Thinking: {thinking_preview}...")
+                        elif isinstance(block, ToolUseBlock) and self.verbose:
+                            print(f"[ClaudeCodeClient] Tool: {block.name}")
+                        elif isinstance(block, ToolResultBlock) and self.verbose:
+                            print(f"[ClaudeCodeClient] Tool result: {block.tool_use_id}")
             elif isinstance(message, ResultMessage):
                 # Final result - extract usage info if available
                 if message.usage:

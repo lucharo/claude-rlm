@@ -21,6 +21,30 @@ Claude Code backend for [RLM](https://github.com/alexzhang13/rlm) (Recursive Lan
 └─────────────────────────────────────────────────────┘
 ```
 
+## Prerequisites
+
+### Claude Code CLI
+
+The Claude Agent SDK requires the Claude Code CLI to be installed:
+
+```bash
+# Install Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+
+# Verify installation
+claude --version
+```
+
+### API Key
+
+Get your API key from https://console.anthropic.com/ and set it:
+
+```bash
+export ANTHROPIC_API_KEY=your_api_key_here
+```
+
+Or copy `.env.example` to `.env` and add your key there.
+
 ## Installation
 
 ```bash
@@ -117,17 +141,24 @@ python -m evals.tasks
 ## Development
 
 ```bash
-# Clone and install
+# Clone and install with dev dependencies
 git clone https://github.com/lucharo/claude-rlm.git
 cd claude-rlm
-uv sync
+uv sync --extra dev
 
 # Run tests
-uv run pytest
+uv run pytest tests/ -v
 
 # Lint
 uv run ruff check .
+
+# Format
+uv run ruff format .
 ```
+
+## Security Note
+
+By default, the client uses `permission_mode="bypassPermissions"` which auto-approves all tool calls. This is appropriate for automated/headless operation but bypasses safety checks. For interactive use, consider setting `permission_mode="acceptEdits"` or `"default"`.
 
 ## License
 
