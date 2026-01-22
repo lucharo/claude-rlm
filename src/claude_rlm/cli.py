@@ -14,7 +14,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from claude_rlm.client import ClaudeCodeClient, SessionMetrics
+from claude_rlm.client import ALL_TOOLS, TOOL_BUNDLES, ClaudeCodeClient, SessionMetrics
 
 app = typer.Typer(
     name="claude-rlm",
@@ -101,11 +101,32 @@ def print_metrics_panel():
 _patch_rlm_clients()
 
 
+def parse_tools(tools_str: str | None, agentic: bool) -> list[str] | None:
+    """Parse tools argument into list of tool names.
+
+    Args:
+        tools_str: Comma-separated tools or bundle name (e.g., "Read,Write" or "all")
+        agentic: If True and no tools specified, use ALL_TOOLS
+
+    Returns:
+        List of tool names or None for no tools
+    """
+    if tools_str:
+        # Check if it's a bundle name
+        if tools_str.lower() in TOOL_BUNDLES:
+            return TOOL_BUNDLES[tools_str.lower()]
+        # Parse comma-separated list
+        return [t.strip() for t in tools_str.split(",") if t.strip()]
+    elif agentic:
+        return ALL_TOOLS
+    return None
+
+
 def get_rlm(
     model: str,
     max_depth: int,
     max_iterations: int,
-    agentic: bool,
+    tools: list[str] | None,
     cwd: Path,
     verbose: bool,
 ):
@@ -115,7 +136,7 @@ def get_rlm(
         model: Claude model to use
         max_depth: Maximum recursion depth
         max_iterations: Maximum REPL iterations
-        agentic: Whether to enable Claude's tools
+        tools: List of allowed tools, or None for no tools
         cwd: Working directory
         verbose: Enable verbose output
 
@@ -128,7 +149,7 @@ def get_rlm(
         backend="claude-code",
         backend_kwargs={
             "model_name": model,
-            "agentic": agentic,
+            "allowed_tools": tools,
             "cwd": cwd,
             "verbose": verbose,
         },
@@ -142,7 +163,7 @@ def run_query(
     model: str,
     max_depth: int,
     max_iterations: int,
-    agentic: bool,
+    tools: list[str] | None,
     cwd: Path,
     verbose: bool,
     show_metrics: bool = True,
@@ -154,7 +175,7 @@ def run_query(
         model: Claude model to use
         max_depth: Maximum recursion depth
         max_iterations: Maximum REPL iterations
-        agentic: Whether to enable Claude's tools
+        tools: List of allowed tools, or None for no tools
         cwd: Working directory
         verbose: Enable verbose output
         show_metrics: Whether to print metrics after completion
@@ -165,7 +186,7 @@ def run_query(
     # Clear previous clients to get fresh metrics
     clear_clients()
 
-    rlm = get_rlm(model, max_depth, max_iterations, agentic, cwd, verbose)
+    rlm = get_rlm(model, max_depth, max_iterations, tools, cwd, verbose)
 
     with Progress(
         SpinnerColumn(),
@@ -198,9 +219,13 @@ def query_cmd(
         int,
         typer.Option("--max-iterations", "-i", help="Maximum REPL iterations"),
     ] = 100,
+    tools: Annotated[
+        str | None,
+        typer.Option("--tools", "-t", help="Tools to enable: comma-separated (Read,Write,Bash) or bundle (all,read-only,file-ops,web)"),
+    ] = None,
     agentic: Annotated[
         bool,
-        typer.Option("--agentic", "-a", help="Enable Claude tools (Read, Write, Bash, etc.)"),
+        typer.Option("--agentic", "-a", help="Enable all tools (shortcut for --tools all)"),
     ] = False,
     cwd: Annotated[
         Path,
@@ -217,8 +242,9 @@ def query_cmd(
 ) -> None:
     """Execute a single query through RLM."""
     try:
+        parsed_tools = parse_tools(tools, agentic)
         result = run_query(
-            prompt, model, max_depth, max_iterations, agentic, cwd.resolve(), verbose,
+            prompt, model, max_depth, max_iterations, parsed_tools, cwd.resolve(), verbose,
             show_metrics=not no_metrics
         )
         console.print(Panel(Markdown(result), title="Result", border_style="green"))
@@ -241,9 +267,13 @@ def repl_cmd(
         int,
         typer.Option("--max-iterations", "-i", help="Maximum REPL iterations"),
     ] = 100,
+    tools: Annotated[
+        str | None,
+        typer.Option("--tools", "-t", help="Tools to enable: comma-separated (Read,Write,Bash) or bundle (all,read-only,file-ops,web)"),
+    ] = None,
     agentic: Annotated[
         bool,
-        typer.Option("--agentic", "-a", help="Enable Claude tools (Read, Write, Bash, etc.)"),
+        typer.Option("--agentic", "-a", help="Enable all tools (shortcut for --tools all)"),
     ] = False,
     cwd: Annotated[
         Path,
@@ -255,13 +285,15 @@ def repl_cmd(
     ] = False,
 ) -> None:
     """Start an interactive REPL session."""
+    parsed_tools = parse_tools(tools, agentic)
+    tools_display = ", ".join(parsed_tools) if parsed_tools else "None"
     console.print(
         Panel(
             "[bold blue]claude-rlm[/bold blue] - Recursive Language Model with Claude Code\n\n"
             f"Model: [cyan]{model}[/cyan]\n"
             f"Max depth: [cyan]{max_depth}[/cyan]\n"
             f"Max iterations: [cyan]{max_iterations}[/cyan]\n"
-            f"Agentic: [cyan]{agentic}[/cyan]\n"
+            f"Tools: [cyan]{tools_display}[/cyan]\n"
             f"Working directory: [cyan]{cwd.resolve()}[/cyan]\n\n"
             "Type [bold]exit[/bold] or [bold]quit[/bold] to exit.\n"
             "Type [bold]help[/bold] for more information.",
@@ -303,7 +335,7 @@ def repl_cmd(
                 continue
 
             result = run_query(
-                prompt, model, max_depth, max_iterations, agentic, cwd_resolved, verbose,
+                prompt, model, max_depth, max_iterations, parsed_tools, cwd_resolved, verbose,
                 show_metrics=True
             )
             console.print(Panel(Markdown(result), title="Result", border_style="green"))

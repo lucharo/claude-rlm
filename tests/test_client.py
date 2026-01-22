@@ -73,23 +73,32 @@ class TestBuildOptions:
     """Tests for _build_options method."""
 
     def test_default_options(self):
-        """Default options for non-agentic mode."""
+        """Default options for no tools."""
         client = ClaudeCodeClient(model_name="test-model")
         options = client._build_options()
 
         assert options.model == "test-model"
         assert options.max_turns == 1
         assert options.permission_mode == "bypassPermissions"
-        assert options.allowed_tools == []
+        assert options.allowed_tools is None  # None when no tools
 
-    def test_agentic_options(self):
-        """Options for agentic mode."""
-        client = ClaudeCodeClient(model_name="test-model", agentic=True)
+    def test_with_tools(self):
+        """Options with specific tools."""
+        client = ClaudeCodeClient(model_name="test-model", allowed_tools=["Read", "Bash"])
         options = client._build_options()
 
         assert options.max_turns == 50
         assert "Read" in options.allowed_tools
         assert "Bash" in options.allowed_tools
+
+    def test_all_tools(self):
+        """Options with ALL_TOOLS."""
+        from claude_rlm.client import ALL_TOOLS
+        client = ClaudeCodeClient(model_name="test-model", allowed_tools=ALL_TOOLS)
+        options = client._build_options()
+
+        assert options.max_turns == 50
+        assert len(options.allowed_tools) == len(ALL_TOOLS)
 
     def test_custom_permission_mode(self):
         """Custom permission mode."""

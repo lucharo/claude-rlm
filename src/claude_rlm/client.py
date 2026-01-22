@@ -23,6 +23,29 @@ from rlm.core.types import ModelUsageSummary, UsageSummary
 
 PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 
+# Available tools that can be enabled
+ALL_TOOLS = [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "TodoWrite",
+    "NotebookEdit",
+]
+
+# Commonly used tool bundles
+TOOL_BUNDLES = {
+    "read-only": ["Read", "Glob", "Grep"],
+    "file-ops": ["Read", "Write", "Edit", "Glob", "Grep"],
+    "web": ["WebFetch", "WebSearch"],
+    "all": ALL_TOOLS,
+}
+
 
 @dataclass
 class CallMetrics:
@@ -109,7 +132,9 @@ class ClaudeCodeClient(BaseLM):
 
     Attributes:
         model_name: The Claude model to use (default: claude-sonnet-4-20250514)
-        agentic: Whether to enable Claude's tools (Read, Write, Bash, etc.)
+        allowed_tools: List of tools to enable, or None for no tools.
+            Available: Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch, Task, etc.
+            Use ALL_TOOLS constant for all tools, or TOOL_BUNDLES for presets.
         cwd: Working directory for agentic operations
         max_tokens: Maximum tokens for response
         verbose: Enable verbose output
@@ -121,7 +146,7 @@ class ClaudeCodeClient(BaseLM):
     """
 
     model_name: str = "claude-sonnet-4-20250514"
-    agentic: bool = False
+    allowed_tools: list[str] | None = None  # None = no tools, list = specific tools
     cwd: Path | None = None
     max_tokens: int = 16384
     verbose: bool = False
@@ -192,31 +217,24 @@ class ClaudeCodeClient(BaseLM):
 
     def _build_options(self, system_prompt: str | None = None) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions for the query."""
-        # Determine allowed tools based on agentic mode
-        if self.agentic:
-            allowed_tools = [
-                "Read",
-                "Write",
-                "Edit",
-                "Bash",
-                "Glob",
-                "Grep",
-                "WebFetch",
-                "WebSearch",
-            ]
-        else:
-            # Non-agentic: explicitly disable all tools
-            allowed_tools = []
+        # Use provided tools or empty list
+        tools = list(self.allowed_tools) if self.allowed_tools else []
+        has_tools = len(tools) > 0
 
-        if self.verbose and self.permission_mode == "bypassPermissions":
-            print("[ClaudeCodeClient] WARNING: Running with bypassPermissions - all tool calls auto-approved")
+        if self.verbose:
+            if tools:
+                print(f"[ClaudeCodeClient] Tools enabled: {', '.join(tools)}")
+            else:
+                print("[ClaudeCodeClient] No tools enabled")
+            if self.permission_mode == "bypassPermissions" and has_tools:
+                print("[ClaudeCodeClient] WARNING: bypassPermissions - all tool calls auto-approved")
 
         return ClaudeAgentOptions(
             model=self.model_name,
-            max_turns=50 if self.agentic else 1,
+            max_turns=50 if has_tools else 1,
             permission_mode=self.permission_mode,
             cwd=str(self.cwd),
-            allowed_tools=allowed_tools,
+            allowed_tools=tools if tools else None,
             system_prompt=system_prompt or self._system_prompt,
         )
 
@@ -247,7 +265,6 @@ class ClaudeCodeClient(BaseLM):
         if self.verbose:
             print(f"[ClaudeCodeClient] Sending prompt ({len(user_prompt)} chars)")
             print(f"[ClaudeCodeClient] Model: {options.model}")
-            print(f"[ClaudeCodeClient] Agentic: {self.agentic}")
             if system_prompt:
                 print(f"[ClaudeCodeClient] System prompt: {len(system_prompt)} chars")
 
